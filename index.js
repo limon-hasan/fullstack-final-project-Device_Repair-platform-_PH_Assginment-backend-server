@@ -31,8 +31,8 @@ let dbPromise = null;
 async function getDb() {
   if (!dbPromise) {
     dbPromise = client.connect().then(() => {
-      console.log("Connected to MongoDB (fixMatedb)");
-      return client.db("fixMatedb");
+      console.log("Connected to MongoDB (fixmatedb)");
+      return client.db("fixmatedb");
     });
   }
   return dbPromise;
