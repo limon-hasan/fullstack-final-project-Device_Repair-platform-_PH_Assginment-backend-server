@@ -691,6 +691,92 @@ app.get("/api/bookings/technician", async (req, res) => {
   }
 });
 
+// Technician: PATCH /api/bookings/:id/status
+app.patch("/api/bookings/:id/status", async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ message: "Invalid booking ID" });
+    }
+
+    const nextStatus = String(req.body?.status || "")
+      .trim()
+      .toLowerCase();
+    const technicianEmail = String(req.body?.technicianEmail || "")
+      .trim()
+      .toLowerCase();
+
+    const allowedTargets = ["accepted", "rejected", "in-progress", "completed"];
+    if (!allowedTargets.includes(nextStatus)) {
+      return res.status(400).json({ message: "Invalid status value" });
+    }
+
+    const { bookings } = await getCollections();
+    const booking = await bookings.findOne({ _id: new ObjectId(id) });
+
+    if (!booking) {
+      return res.status(404).json({ message: "Booking not found" });
+    }
+
+    if (
+      technicianEmail &&
+      String(booking.technicianEmail || "").toLowerCase() !== technicianEmail
+    ) {
+      return res
+        .status(403)
+        .json({ message: "You are not assigned to this booking" });
+    }
+
+    const currentStatus = String(booking.status || "requested").toLowerCase();
+    const validTransitions = {
+      requested: ["accepted", "rejected"],
+      accepted: ["in-progress"],
+      "in-progress": ["completed"],
+    };
+
+    const allowedNext = validTransitions[currentStatus] || [];
+    if (!allowedNext.includes(nextStatus)) {
+      return res.status(400).json({
+        message: `Cannot change status from "${currentStatus}" to "${nextStatus}"`,
+      });
+    }
+
+    const updateFields = {
+      status: nextStatus,
+      updatedAt: new Date(),
+    };
+
+    if (
+      nextStatus === "completed" &&
+      req.body?.finalAmount !== undefined &&
+      req.body?.finalAmount !== null &&
+      req.body?.finalAmount !== ""
+    ) {
+      const parsedAmount = Number(req.body.finalAmount);
+      if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+        return res
+          .status(400)
+          .json({ message: "Final amount must be a positive number" });
+      }
+      updateFields.finalAmount = parsedAmount;
+    }
+
+    const result = await bookings.findOneAndUpdate(
+      { _id: new ObjectId(id) },
+      { $set: updateFields },
+      { returnDocument: "after" }
+    );
+
+    res.json({
+      message: `Booking status updated to ${nextStatus}`,
+      booking: result,
+    });
+  } catch (error) {
+    console.error("PATCH /api/bookings/:id/status error:", error);
+    res.status(500).json({ message: "Failed to update booking status" });
+  }
+});
+
 if (!process.env.VERCEL) {
   app.listen(port, () => {
     console.log(`FixMate server running on http://localhost:${port}`);
