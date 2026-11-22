@@ -1,15 +1,20 @@
 import express from "express";
 import cors from "cors";
 import "dotenv/config";
-import { MongoClient } from "mongodb";
+import { MongoClient, ObjectId } from "mongodb";
 
 const app = express();
 const port = process.env.PORT || 8000;
 
-const allowedOrigins = (process.env.CLIENT_URL || "http://localhost:3000")
-  .split(",")
-  .map((origin) => origin.trim())
-  .filter(Boolean);
+const allowedOrigins = Array.from(
+  new Set([
+    "http://localhost:3000",
+    ...(process.env.CLIENT_URL || "")
+      .split(",")
+      .map((origin) => origin.trim().replace(/\/+$/, ""))
+      .filter(Boolean),
+  ]),
+);
 
 app.use(
   cors({
@@ -87,6 +92,46 @@ app.get("/api/services", async (req, res) => {
   } catch (error) {
     console.error("GET /api/services error:", error);
     res.status(500).json({ message: "Failed to fetch repair services" });
+  }
+});
+
+// Public: GET /api/services/:id (approved & available + technician summary)
+app.get("/api/services/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(404).json({ message: "Service not found" });
+    }
+
+    const { services, users } = await getCollections();
+    const service = await services.findOne({
+      _id: new ObjectId(id),
+      approvalStatus: "approved",
+      isAvailable: true,
+    });
+
+    if (!service) {
+      return res.status(404).json({ message: "Service not found" });
+    }
+
+    const technicianUser = await users.findOne(
+      { email: service.technicianEmail },
+      { projection: { name: 1, image: 1, area: 1, bio: 1 } }
+    );
+
+    res.json({
+      ...service,
+      technician: {
+        name: technicianUser?.name || service.technicianName || "Technician",
+        image: technicianUser?.image || "",
+        area: technicianUser?.area || service.serviceArea || "",
+        bio: technicianUser?.bio || "",
+      },
+    });
+  } catch (error) {
+    console.error("GET /api/services/:id error:", error);
+    res.status(500).json({ message: "Failed to fetch service details" });
   }
 });
 
