@@ -68,6 +68,28 @@ app.get("/api/health", async (req, res) => {
   }
 });
 
+// Public: GET /api/services (approved & available only, newest first)
+app.get("/api/services", async (req, res) => {
+  try {
+    const { services } = await getCollections();
+    const limit = Number.parseInt(req.query.limit, 10);
+
+    let cursor = services
+      .find({ approvalStatus: "approved", isAvailable: true })
+      .sort({ createdAt: -1 });
+
+    if (Number.isInteger(limit) && limit > 0) {
+      cursor = cursor.limit(limit);
+    }
+
+    const list = await cursor.toArray();
+    res.json(list);
+  } catch (error) {
+    console.error("GET /api/services error:", error);
+    res.status(500).json({ message: "Failed to fetch repair services" });
+  }
+});
+
 if (!process.env.VERCEL) {
   app.listen(port, () => {
     console.log(`FixMate server running on http://localhost:${port}`);
