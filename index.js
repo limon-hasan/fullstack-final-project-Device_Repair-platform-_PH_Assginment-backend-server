@@ -98,7 +98,9 @@ app.get("/api/services", async (req, res) => {
 // Technician: GET /api/services/technician?email=...
 app.get("/api/services/technician", async (req, res) => {
   try {
-    const email = String(req.query.email || "").trim().toLowerCase();
+    const email = String(req.query.email || "")
+      .trim()
+      .toLowerCase();
     if (!email) {
       return res.status(400).json({ message: "Technician email is required" });
     }
@@ -157,7 +159,7 @@ app.get("/api/services/:id", async (req, res) => {
 
     const technicianUser = await users.findOne(
       { email: service.technicianEmail },
-      { projection: { name: 1, image: 1, area: 1, bio: 1 } }
+      { projection: { name: 1, image: 1, area: 1, bio: 1 } },
     );
 
     res.json({
@@ -313,7 +315,9 @@ app.post("/api/bookings", async (req, res) => {
 // Profile: GET /api/users/profile?email=...
 app.get("/api/users/profile", async (req, res) => {
   try {
-    const email = String(req.query.email || "").trim().toLowerCase();
+    const email = String(req.query.email || "")
+      .trim()
+      .toLowerCase();
     if (!email) {
       return res.status(400).json({ message: "User email is required" });
     }
@@ -332,7 +336,7 @@ app.get("/api/users/profile", async (req, res) => {
           bio: 1,
           createdAt: 1,
         },
-      }
+      },
     );
 
     if (!user) {
@@ -363,7 +367,9 @@ app.patch("/api/users/profile", async (req, res) => {
   try {
     const { email, name, image, phone, area, bio } = req.body || {};
 
-    const normalizedEmail = String(email || "").trim().toLowerCase();
+    const normalizedEmail = String(email || "")
+      .trim()
+      .toLowerCase();
     if (!normalizedEmail) {
       return res.status(400).json({ message: "User email is required" });
     }
@@ -404,7 +410,7 @@ app.patch("/api/users/profile", async (req, res) => {
 
     await users.updateOne(
       { email: existingUser.email },
-      { $set: updateFields }
+      { $set: updateFields },
     );
 
     // Keep technicianName synced on their service listings if name changed
@@ -414,7 +420,7 @@ app.patch("/api/users/profile", async (req, res) => {
     ) {
       await services.updateMany(
         { technicianEmail: existingUser.email },
-        { $set: { technicianName: trimmedName } }
+        { $set: { technicianName: trimmedName } },
       );
     }
 
@@ -436,7 +442,9 @@ app.patch("/api/users/profile", async (req, res) => {
 // Customer: GET /api/bookings/customer?email=...
 app.get("/api/bookings/customer", async (req, res) => {
   try {
-    const email = String(req.query.email || "").trim().toLowerCase();
+    const email = String(req.query.email || "")
+      .trim()
+      .toLowerCase();
     if (!email) {
       return res.status(400).json({ message: "Customer email is required" });
     }
@@ -521,7 +529,7 @@ app.patch("/api/bookings/:id/cancel", async (req, res) => {
     const updatedAt = new Date();
     await bookings.updateOne(
       { _id: booking._id },
-      { $set: { status: "cancelled", updatedAt } }
+      { $set: { status: "cancelled", updatedAt } },
     );
 
     res.json({
@@ -541,7 +549,9 @@ app.patch("/api/bookings/:id/cancel", async (req, res) => {
 // Customer: GET /api/payments/customer?email=...
 app.get("/api/payments/customer", async (req, res) => {
   try {
-    const email = String(req.query.email || "").trim().toLowerCase();
+    const email = String(req.query.email || "")
+      .trim()
+      .toLowerCase();
     if (!email) {
       return res.status(400).json({ message: "Customer email is required" });
     }
@@ -568,14 +578,12 @@ app.post("/api/services", async (req, res) => {
     const image = String(req.body?.image || "").trim();
     const basePrice = Number(req.body?.basePrice);
     const estimatedDuration = String(
-      req.body?.estimatedDuration || "1-2 hours"
+      req.body?.estimatedDuration || "1-2 hours",
     ).trim();
-    const serviceMode = String(
-      req.body?.serviceMode || "Home Visit"
-    ).trim();
+    const serviceMode = String(req.body?.serviceMode || "Home Visit").trim();
     const serviceArea = String(req.body?.serviceArea || "").trim();
     const technicianName = String(
-      req.body?.technicianName || "Technician"
+      req.body?.technicianName || "Technician",
     ).trim();
     const technicianEmail = String(req.body?.technicianEmail || "")
       .trim()
@@ -626,6 +634,60 @@ app.post("/api/services", async (req, res) => {
   } catch (error) {
     console.error("POST /api/services error:", error);
     res.status(500).json({ message: "Failed to create service" });
+  }
+});
+
+// Technician: GET /api/bookings/technician?email=...
+app.get("/api/bookings/technician", async (req, res) => {
+  try {
+    const email = String(req.query.email || "")
+      .trim()
+      .toLowerCase();
+    if (!email) {
+      return res.status(400).json({ message: "Technician email is required" });
+    }
+
+    const { bookings } = await getCollections();
+    const list = await bookings
+      .find({ technicianEmail: email })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    let requested = 0;
+    let accepted = 0;
+    let inProgress = 0;
+    let completed = 0;
+    let earnings = 0;
+
+    for (const item of list) {
+      const status = (item.status || "requested").toLowerCase();
+      if (status === "requested") requested += 1;
+      else if (status === "accepted") accepted += 1;
+      else if (status === "in-progress") inProgress += 1;
+      else if (status === "completed") {
+        completed += 1;
+        if ((item.paymentStatus || "").toLowerCase() === "paid") {
+          earnings += Number(item.finalAmount ?? item.basePrice ?? 0);
+        }
+      }
+    }
+
+    res.json({
+      bookings: list,
+      stats: {
+        total: list.length,
+        requested,
+        accepted,
+        inProgress,
+        completed,
+        earnings,
+      },
+    });
+  } catch (error) {
+    console.error("GET /api/bookings/technician error:", error);
+    res
+      .status(500)
+      .json({ message: "Failed to load technician booking requests" });
   }
 });
 
