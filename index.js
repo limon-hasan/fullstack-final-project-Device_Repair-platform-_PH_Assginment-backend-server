@@ -6,6 +6,18 @@ import { MongoClient, ObjectId } from "mongodb";
 const app = express();
 const port = process.env.PORT || 8000;
 
+const ALLOWED_CATEGORIES = [
+  "Smartphone",
+  "Laptop & PC",
+  "AC",
+  "Refrigerator",
+  "TV",
+  "Washing Machine",
+  "Electrical",
+];
+
+const ALLOWED_SERVICE_MODES = ["Home Visit", "Shop Drop-off"];
+
 const allowedOrigins = Array.from(
   new Set([
     "http://localhost:3000",
@@ -53,6 +65,10 @@ async function getCollections() {
   };
 }
 
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 app.get("/", (req, res) => {
   res.json({
     status: "ok",
@@ -73,15 +89,56 @@ app.get("/api/health", async (req, res) => {
   }
 });
 
-// Public: GET /api/services (approved & available only, newest first)
+// ==========================================
+// PUBLIC & TECHNICIAN SERVICE ROUTES
+// ==========================================
+
+// Public: GET /api/services (approved & available only, supports server-side search, filter, sort, limit)
 app.get("/api/services", async (req, res) => {
   try {
     const { services } = await getCollections();
     const limit = Number.parseInt(req.query.limit, 10);
+    const search = String(req.query.search || "").trim();
+    const category = String(req.query.category || "").trim();
+    const serviceMode = String(req.query.serviceMode || "").trim();
+    const sort = String(req.query.sort || "newest")
+      .trim()
+      .toLowerCase();
 
-    let cursor = services
-      .find({ approvalStatus: "approved", isAvailable: true })
-      .sort({ createdAt: -1 });
+    const query = {
+      approvalStatus: "approved",
+      isAvailable: true,
+    };
+
+    if (search) {
+      const regex = new RegExp(escapeRegex(search), "i");
+      query.$or = [{ title: regex }, { category: regex }];
+    }
+
+    if (category && category.toLowerCase() !== "all") {
+      query.category = category;
+    }
+
+    if (serviceMode && serviceMode.toLowerCase() !== "all") {
+      query.serviceMode = serviceMode;
+    }
+
+    let sortSpec = { createdAt: -1 };
+    if (
+      sort === "price_asc" ||
+      sort === "price-asc" ||
+      sort === "low-to-high"
+    ) {
+      sortSpec = { basePrice: 1, createdAt: -1 };
+    } else if (
+      sort === "price_desc" ||
+      sort === "price-desc" ||
+      sort === "high-to-low"
+    ) {
+      sortSpec = { basePrice: -1, createdAt: -1 };
+    }
+
+    let cursor = services.find(query).sort(sortSpec);
 
     if (Number.isInteger(limit) && limit > 0) {
       cursor = cursor.limit(limit);
@@ -95,7 +152,7 @@ app.get("/api/services", async (req, res) => {
   }
 });
 
-// Technician: GET /api/services/technician?email=...
+// Technician: GET /api/services/technician?email=... (MUST stay above /api/services/:id)
 app.get("/api/services/technician", async (req, res) => {
   try {
     const email = String(req.query.email || "")
@@ -115,7 +172,7 @@ app.get("/api/services/technician", async (req, res) => {
     let pending = 0;
     let rejected = 0;
 
-    for (const item of technicianServices) {
+    for (const item of list) {
       const st = String(
         item.approvalStatus || item.status || "pending",
       ).toLowerCase();
@@ -139,7 +196,140 @@ app.get("/api/services/technician", async (req, res) => {
   }
 });
 
-// Technician: PATCH /api/services/:id (Edit service -> resets approvalStatus to "pending", OR toggle isAvailable)
+// Public: GET /api/services/:id (approved & available service with technician summary)
+app.get("/api/services/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!ObjectId.isValid(id)) {
+      return res.status(404).json({ message: "Service not found" });
+    }
+
+    const { services, users } = await getCollections();
+    const service = await services.findOne({
+      _id: new ObjectId(id),
+      approvalStatus: "approved",
+      isAvailable: true,
+    });
+
+    if (!service) {
+      return res.status(404).json({ message: "Service not found" });
+    }
+
+    const technician = service.technicianEmail
+      ? await users.findOne(
+          { email: String(service.technicianEmail).toLowerCase() },
+          { projection: { name: 1, image: 1, area: 1, bio: 1, email: 1 } },
+        )
+      : null;
+
+    res.json({
+      ...service,
+      technician: technician
+        ? {
+            name: technician.name || service.technicianName || "Technician",
+            image: technician.image || "",
+            area: technician.area || service.serviceArea || "",
+            bio: technician.bio || "",
+          }
+        : {
+            name: service.technicianName || "Technician",
+            image: "",
+            area: service.serviceArea || "",
+            bio: "",
+          },
+    });
+  } catch (error) {
+    console.error("GET /api/services/:id error:", error);
+    res.status(500).json({ message: "Failed to fetch service details" });
+  }
+});
+
+// Technician: POST /api/services (creates new service with approvalStatus: "pending", isAvailable: true)
+app.post("/api/services", async (req, res) => {
+  try {
+    const title = String(req.body?.title || "").trim();
+    const category = String(req.body?.category || "").trim();
+    const description = String(req.body?.description || "").trim();
+    const image = String(req.body?.image || "").trim();
+    const basePrice = Number(req.body?.basePrice);
+    const estimatedDuration = String(
+      req.body?.estimatedDuration || "1-2 hours",
+    ).trim();
+    const serviceMode = String(req.body?.serviceMode || "Home Visit").trim();
+    const serviceArea = String(req.body?.serviceArea || "").trim();
+    const technicianName = String(
+      req.body?.technicianName || "Technician",
+    ).trim();
+    const technicianEmail = String(req.body?.technicianEmail || "")
+      .trim()
+      .toLowerCase();
+
+    if (!title || title.length < 4) {
+      return res
+        .status(400)
+        .json({ message: "Title must be at least 4 characters" });
+    }
+
+    if (!ALLOWED_CATEGORIES.includes(category)) {
+      return res.status(400).json({ message: "Invalid service category" });
+    }
+
+    if (!ALLOWED_SERVICE_MODES.includes(serviceMode)) {
+      return res.status(400).json({ message: "Invalid service mode" });
+    }
+
+    if (!description || description.length < 15) {
+      return res
+        .status(400)
+        .json({ message: "Description must be at least 15 characters" });
+    }
+
+    if (!technicianEmail) {
+      return res.status(400).json({ message: "Technician email is required" });
+    }
+
+    if (!Number.isFinite(basePrice) || basePrice <= 0) {
+      return res
+        .status(400)
+        .json({ message: "Base price must be a positive number" });
+    }
+
+    const { services } = await getCollections();
+    const now = new Date();
+
+    const newService = {
+      title,
+      category,
+      description,
+      image,
+      basePrice,
+      estimatedDuration,
+      serviceMode,
+      serviceArea,
+      technicianName,
+      technicianEmail,
+      approvalStatus: "pending",
+      isAvailable: true,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const result = await services.insertOne(newService);
+
+    res.status(201).json({
+      message: "Service submitted for admin approval",
+      service: {
+        _id: result.insertedId,
+        ...newService,
+      },
+    });
+  } catch (error) {
+    console.error("POST /api/services error:", error);
+    res.status(500).json({ message: "Failed to create service" });
+  }
+});
+
+// Technician: PATCH /api/services/:id (Edit -> resets approvalStatus to "pending", OR toggle isAvailable)
 app.patch("/api/services/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -166,17 +356,6 @@ app.patch("/api/services/:id", async (req, res) => {
         .json({ message: "You can only update your own services" });
     }
 
-    const allowedCategories = [
-      "Smartphone",
-      "Laptop & PC",
-      "AC",
-      "Refrigerator",
-      "TV",
-      "Washing Machine",
-      "Electrical",
-    ];
-    const allowedModes = ["Home Visit", "Shop Drop-off"];
-
     const updateFields = { updatedAt: new Date() };
     let hasContentEdits = false;
 
@@ -193,7 +372,7 @@ app.patch("/api/services/:id", async (req, res) => {
 
     if (req.body?.category !== undefined) {
       const category = String(req.body.category).trim();
-      if (!allowedCategories.includes(category)) {
+      if (!ALLOWED_CATEGORIES.includes(category)) {
         return res.status(400).json({ message: "Invalid service category" });
       }
       updateFields.category = category;
@@ -244,7 +423,7 @@ app.patch("/api/services/:id", async (req, res) => {
 
     if (req.body?.serviceMode !== undefined) {
       const serviceMode = String(req.body.serviceMode).trim();
-      if (!allowedModes.includes(serviceMode)) {
+      if (!ALLOWED_SERVICE_MODES.includes(serviceMode)) {
         return res.status(400).json({ message: "Invalid service mode" });
       }
       updateFields.serviceMode = serviceMode;
@@ -268,7 +447,6 @@ app.patch("/api/services/:id", async (req, res) => {
       return res.status(400).json({ message: "No valid fields to update" });
     }
 
-    // Per requirements: editing service details resets approvalStatus back to "pending"
     if (hasContentEdits) {
       updateFields.approvalStatus = "pending";
     }
@@ -276,7 +454,7 @@ app.patch("/api/services/:id", async (req, res) => {
     const updated = await services.findOneAndUpdate(
       { _id: new ObjectId(id) },
       { $set: updateFields },
-      { returnDocument: "after" }
+      { returnDocument: "after" },
     );
 
     res.json({
@@ -309,7 +487,7 @@ app.delete("/api/services/:id", async (req, res) => {
     }
 
     const technicianEmail = String(
-      req.query.email || req.body?.technicianEmail || ""
+      req.query.email || req.body?.technicianEmail || "",
     )
       .trim()
       .toLowerCase();
@@ -334,140 +512,9 @@ app.delete("/api/services/:id", async (req, res) => {
   }
 });
 
-// Bookings: POST /api/bookings (create a new repair request)
-app.post("/api/bookings", async (req, res) => {
-  try {
-    const {
-      serviceId,
-      customerName,
-      customerEmail,
-      customerPhone,
-      address,
-      preferredDate,
-      problemDescription,
-    } = req.body || {};
-
-    if (!serviceId || !ObjectId.isValid(serviceId)) {
-      return res.status(400).json({ message: "Invalid service ID" });
-    }
-
-    if (!customerEmail || typeof customerEmail !== "string") {
-      return res
-        .status(401)
-        .json({ message: "Customer authentication required" });
-    }
-
-    if (!customerPhone || String(customerPhone).trim().length < 7) {
-      return res
-        .status(400)
-        .json({ message: "Please provide a valid phone number" });
-    }
-
-    if (!address || String(address).trim().length < 5) {
-      return res
-        .status(400)
-        .json({ message: "Please provide a valid service address" });
-    }
-
-    if (!preferredDate) {
-      return res
-        .status(400)
-        .json({ message: "Please choose a preferred date" });
-    }
-
-    const dateOnly = String(preferredDate).slice(0, 10);
-    const parsedDate = new Date(preferredDate);
-    const endOfPreferredDay = new Date(`${dateOnly}T23:59:59.999Z`);
-    if (
-      Number.isNaN(parsedDate.getTime()) ||
-      Number.isNaN(endOfPreferredDay.getTime()) ||
-      endOfPreferredDay < new Date()
-    ) {
-      return res
-        .status(400)
-        .json({ message: "Preferred date must be today or a future date" });
-    }
-
-    if (!problemDescription || String(problemDescription).trim().length < 20) {
-      return res.status(400).json({
-        message: "Problem description must be at least 20 characters",
-      });
-    }
-
-    const { users, services, bookings } = await getCollections();
-    const normalizedEmail = customerEmail.trim().toLowerCase();
-
-    // Verify customer role from DB
-    const dbUser = await users.findOne({ email: normalizedEmail });
-    const userRole = (dbUser?.role || "").toLowerCase();
-    if (!dbUser || userRole !== "customer") {
-      return res
-        .status(403)
-        .json({ message: "Only customers can request a repair" });
-    }
-
-    // Verify service exists, is approved, and is available
-    const service = await services.findOne({
-      _id: new ObjectId(serviceId),
-      approvalStatus: "approved",
-      isAvailable: true,
-    });
-
-    if (!service) {
-      return res
-        .status(404)
-        .json({ message: "Service is not available for booking" });
-    }
-
-    // Prevent duplicate active requests (requested, accepted, in-progress)
-    const existingActiveBooking = await bookings.findOne({
-      serviceId: String(service._id),
-      customerEmail: dbUser.email,
-      status: { $in: ["requested", "accepted", "in-progress"] },
-    });
-
-    if (existingActiveBooking) {
-      return res.status(409).json({
-        message: "You already have an active request for this service",
-      });
-    }
-
-    const basePrice = Number(service.basePrice) || 0;
-
-    const newBooking = {
-      serviceId: String(service._id),
-      serviceTitle: service.title,
-      serviceImage: service.image || "",
-      category: service.category,
-      basePrice,
-      technicianName: service.technicianName,
-      technicianEmail: service.technicianEmail,
-      customerName: dbUser.name || String(customerName || "").trim(),
-      customerEmail: dbUser.email,
-      customerPhone: String(customerPhone).trim(),
-      address: String(address).trim(),
-      preferredDate: parsedDate,
-      problemDescription: String(problemDescription).trim(),
-      status: "requested",
-      finalAmount: basePrice,
-      paymentStatus: "unpaid",
-      createdAt: new Date(),
-    };
-
-    const result = await bookings.insertOne(newBooking);
-
-    res.status(201).json({
-      message: "Repair request submitted successfully",
-      booking: {
-        _id: result.insertedId,
-        ...newBooking,
-      },
-    });
-  } catch (error) {
-    console.error("POST /api/bookings error:", error);
-    res.status(500).json({ message: "Failed to submit repair request" });
-  }
-});
+// ==========================================
+// PROFILE ROUTES (ALL LOGGED-IN ROLES)
+// ==========================================
 
 // Profile: GET /api/users/profile?email=...
 app.get("/api/users/profile", async (req, res) => {
@@ -570,7 +617,6 @@ app.patch("/api/users/profile", async (req, res) => {
       { $set: updateFields },
     );
 
-    // Keep technicianName synced on their service listings if name changed
     if (
       (existingUser.role || "").toLowerCase() === "technician" &&
       trimmedName !== existingUser.name
@@ -593,6 +639,142 @@ app.patch("/api/users/profile", async (req, res) => {
   } catch (error) {
     console.error("PATCH /api/users/profile error:", error);
     res.status(500).json({ message: "Failed to update profile" });
+  }
+});
+
+// ==========================================
+// BOOKING & PAYMENT ROUTES
+// ==========================================
+
+// Customer: POST /api/bookings (create a new repair request)
+app.post("/api/bookings", async (req, res) => {
+  try {
+    const {
+      serviceId,
+      customerName,
+      customerEmail,
+      customerPhone,
+      address,
+      preferredDate,
+      problemDescription,
+    } = req.body || {};
+
+    if (!serviceId || !ObjectId.isValid(serviceId)) {
+      return res.status(400).json({ message: "Invalid service ID" });
+    }
+
+    if (!customerEmail || typeof customerEmail !== "string") {
+      return res
+        .status(401)
+        .json({ message: "Customer authentication required" });
+    }
+
+    if (!customerPhone || String(customerPhone).trim().length < 7) {
+      return res
+        .status(400)
+        .json({ message: "Please provide a valid phone number" });
+    }
+
+    if (!address || String(address).trim().length < 5) {
+      return res
+        .status(400)
+        .json({ message: "Please provide a valid service address" });
+    }
+
+    if (!preferredDate) {
+      return res
+        .status(400)
+        .json({ message: "Please choose a preferred date" });
+    }
+
+    const dateOnly = String(preferredDate).slice(0, 10);
+    const parsedDate = new Date(preferredDate);
+    const endOfPreferredDay = new Date(`${dateOnly}T23:59:59.999Z`);
+    if (
+      Number.isNaN(parsedDate.getTime()) ||
+      Number.isNaN(endOfPreferredDay.getTime()) ||
+      endOfPreferredDay < new Date()
+    ) {
+      return res
+        .status(400)
+        .json({ message: "Preferred date must be today or a future date" });
+    }
+
+    if (!problemDescription || String(problemDescription).trim().length < 20) {
+      return res.status(400).json({
+        message: "Problem description must be at least 20 characters",
+      });
+    }
+
+    const { users, services, bookings } = await getCollections();
+    const normalizedEmail = customerEmail.trim().toLowerCase();
+
+    const dbUser = await users.findOne({ email: normalizedEmail });
+    const userRole = (dbUser?.role || "").toLowerCase();
+    if (!dbUser || userRole !== "customer") {
+      return res
+        .status(403)
+        .json({ message: "Only customers can request a repair" });
+    }
+
+    const service = await services.findOne({
+      _id: new ObjectId(serviceId),
+      approvalStatus: "approved",
+      isAvailable: true,
+    });
+
+    if (!service) {
+      return res
+        .status(404)
+        .json({ message: "Service is not available for booking" });
+    }
+
+    const existingActiveBooking = await bookings.findOne({
+      serviceId: String(service._id),
+      customerEmail: dbUser.email,
+      status: { $in: ["requested", "accepted", "in-progress"] },
+    });
+
+    if (existingActiveBooking) {
+      return res.status(409).json({
+        message: "You already have an active request for this service",
+      });
+    }
+
+    const basePrice = Number(service.basePrice) || 0;
+
+    const newBooking = {
+      serviceId: String(service._id),
+      serviceTitle: service.title,
+      serviceImage: service.image || "",
+      category: service.category,
+      basePrice,
+      technicianName: service.technicianName,
+      technicianEmail: service.technicianEmail,
+      customerName: dbUser.name || String(customerName || "").trim(),
+      customerEmail: dbUser.email,
+      customerPhone: String(customerPhone).trim(),
+      address: String(address).trim(),
+      preferredDate: parsedDate,
+      problemDescription: String(problemDescription).trim(),
+      status: "requested",
+      finalAmount: basePrice,
+      paymentStatus: "unpaid",
+      createdAt: new Date(),
+    };
+
+    const result = await bookings.insertOne(newBooking);
+
+    res.status(201).json({
+      message: "Repair request submitted successfully",
+      booking: {
+        _id: result.insertedId,
+        ...newBooking,
+      },
+    });
+  } catch (error) {
+    console.error("POST /api/bookings error:", error);
+    res.status(500).json({ message: "Failed to submit repair request" });
   }
 });
 
@@ -726,74 +908,6 @@ app.get("/api/payments/customer", async (req, res) => {
   }
 });
 
-// Technician: POST /api/services (creates new service with approvalStatus: "pending")
-app.post("/api/services", async (req, res) => {
-  try {
-    const title = String(req.body?.title || "").trim();
-    const category = String(req.body?.category || "").trim();
-    const description = String(req.body?.description || "").trim();
-    const image = String(req.body?.image || "").trim();
-    const basePrice = Number(req.body?.basePrice);
-    const estimatedDuration = String(
-      req.body?.estimatedDuration || "1-2 hours",
-    ).trim();
-    const serviceMode = String(req.body?.serviceMode || "Home Visit").trim();
-    const serviceArea = String(req.body?.serviceArea || "").trim();
-    const technicianName = String(
-      req.body?.technicianName || "Technician",
-    ).trim();
-    const technicianEmail = String(req.body?.technicianEmail || "")
-      .trim()
-      .toLowerCase();
-
-    if (!title || !category || !description || !technicianEmail) {
-      return res.status(400).json({
-        message:
-          "Title, category, description, and technicianEmail are required",
-      });
-    }
-
-    if (!Number.isFinite(basePrice) || basePrice <= 0) {
-      return res.status(400).json({
-        message: "Base price must be a positive number",
-      });
-    }
-
-    const { services } = await getCollections();
-    const now = new Date();
-
-    const newService = {
-      title,
-      category,
-      description,
-      image: image || "",
-      basePrice,
-      estimatedDuration,
-      serviceMode,
-      serviceArea,
-      technicianName,
-      technicianEmail,
-      approvalStatus: "pending",
-      isAvailable: true,
-      createdAt: now,
-      updatedAt: now,
-    };
-
-    const result = await services.insertOne(newService);
-
-    res.status(201).json({
-      message: "Service submitted for admin approval",
-      service: {
-        _id: result.insertedId,
-        ...newService,
-      },
-    });
-  } catch (error) {
-    console.error("POST /api/services error:", error);
-    res.status(500).json({ message: "Failed to create service" });
-  }
-});
-
 // Technician: GET /api/bookings/technician?email=...
 app.get("/api/bookings/technician", async (req, res) => {
   try {
@@ -848,7 +962,7 @@ app.get("/api/bookings/technician", async (req, res) => {
   }
 });
 
-// Technician: PATCH /api/bookings/:id/status
+// Technician: PATCH /api/bookings/:id/status (strict pipeline + required finalAmount on completed)
 app.patch("/api/bookings/:id/status", async (req, res) => {
   try {
     const { id } = req.params;
@@ -903,17 +1017,13 @@ app.patch("/api/bookings/:id/status", async (req, res) => {
       updatedAt: new Date(),
     };
 
-    if (
-      nextStatus === "completed" &&
-      req.body?.finalAmount !== undefined &&
-      req.body?.finalAmount !== null &&
-      req.body?.finalAmount !== ""
-    ) {
-      const parsedAmount = Number(req.body.finalAmount);
+    if (nextStatus === "completed") {
+      const parsedAmount = Number(req.body?.finalAmount);
       if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
-        return res
-          .status(400)
-          .json({ message: "Final amount must be a positive number" });
+        return res.status(400).json({
+          message:
+            "A valid positive finalAmount is required to complete a booking",
+        });
       }
       updateFields.finalAmount = parsedAmount;
     }
@@ -933,6 +1043,10 @@ app.patch("/api/bookings/:id/status", async (req, res) => {
     res.status(500).json({ message: "Failed to update booking status" });
   }
 });
+
+// ==========================================
+// ADMIN ROUTES
+// ==========================================
 
 // Admin: GET /api/admin/overview
 app.get("/api/admin/overview", async (req, res) => {
@@ -1021,6 +1135,128 @@ app.get("/api/admin/overview", async (req, res) => {
   } catch (error) {
     console.error("GET /api/admin/overview error:", error);
     res.status(500).json({ message: "Failed to load admin overview data" });
+  }
+});
+
+// Admin: GET /api/admin/services?status=all|pending|approved|rejected&search=...
+app.get("/api/admin/services", async (req, res) => {
+  try {
+    const statusFilter = String(req.query.status || "all")
+      .trim()
+      .toLowerCase();
+    const search = String(req.query.search || "")
+      .trim()
+      .toLowerCase();
+
+    const { services } = await getCollections();
+    const allServices = await services
+      .find({})
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    let approved = 0;
+    let pending = 0;
+    let rejected = 0;
+
+    for (const s of allServices) {
+      const st = String(
+        s.approvalStatus || s.status || "pending",
+      ).toLowerCase();
+      if (st === "approved") approved += 1;
+      else if (st === "rejected") rejected += 1;
+      else pending += 1;
+    }
+
+    const filtered = allServices.filter((s) => {
+      const st = String(
+        s.approvalStatus || s.status || "pending",
+      ).toLowerCase();
+
+      const matchesStatus = statusFilter === "all" || st === statusFilter;
+      if (!matchesStatus) return false;
+
+      if (!search) return true;
+      const haystack = [
+        s.title,
+        s.category,
+        s.technicianName,
+        s.technicianEmail,
+        s.serviceArea,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+
+      return haystack.includes(search);
+    });
+
+    res.json({
+      services: filtered,
+      stats: {
+        total: allServices.length,
+        approved,
+        pending,
+        rejected,
+      },
+    });
+  } catch (error) {
+    console.error("GET /api/admin/services error:", error);
+    res.status(500).json({ message: "Failed to load admin services list" });
+  }
+});
+
+// Admin: PATCH /api/admin/services/:id/approval
+app.patch("/api/admin/services/:id/approval", async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ message: "Invalid service ID" });
+    }
+
+    const approvalStatus = String(req.body?.approvalStatus || "")
+      .trim()
+      .toLowerCase();
+    const rejectionReason = String(req.body?.rejectionReason || "").trim();
+
+    if (!["approved", "rejected", "pending"].includes(approvalStatus)) {
+      return res.status(400).json({
+        message: 'approvalStatus must be "approved", "rejected", or "pending"',
+      });
+    }
+
+    const { services } = await getCollections();
+    const existing = await services.findOne({ _id: new ObjectId(id) });
+
+    if (!existing) {
+      return res.status(404).json({ message: "Service not found" });
+    }
+
+    const updateFields = {
+      approvalStatus,
+      updatedAt: new Date(),
+    };
+
+    if (approvalStatus === "rejected" && rejectionReason) {
+      updateFields.rejectionReason = rejectionReason;
+    } else if (approvalStatus === "approved") {
+      updateFields.rejectionReason = "";
+    }
+
+    const updated = await services.findOneAndUpdate(
+      { _id: new ObjectId(id) },
+      { $set: updateFields },
+      { returnDocument: "after" },
+    );
+
+    res.json({
+      message: `Service ${approvalStatus} successfully`,
+      service: updated,
+    });
+  } catch (error) {
+    console.error("PATCH /api/admin/services/:id/approval error:", error);
+    res
+      .status(500)
+      .json({ message: "Failed to update service approval status" });
   }
 });
 
