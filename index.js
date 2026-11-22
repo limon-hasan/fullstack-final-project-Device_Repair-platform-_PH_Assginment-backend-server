@@ -270,6 +270,129 @@ app.post("/api/bookings", async (req, res) => {
   }
 });
 
+// Profile: GET /api/users/profile?email=...
+app.get("/api/users/profile", async (req, res) => {
+  try {
+    const email = String(req.query.email || "").trim().toLowerCase();
+    if (!email) {
+      return res.status(400).json({ message: "User email is required" });
+    }
+
+    const { users } = await getCollections();
+    const user = await users.findOne(
+      { email },
+      {
+        projection: {
+          name: 1,
+          email: 1,
+          image: 1,
+          role: 1,
+          phone: 1,
+          area: 1,
+          bio: 1,
+          createdAt: 1,
+        },
+      }
+    );
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    res.json({
+      user: {
+        _id: user._id,
+        name: user.name || "",
+        email: user.email,
+        image: user.image || "",
+        role: user.role || "customer",
+        phone: user.phone || "",
+        area: user.area || "",
+        bio: user.bio || "",
+        createdAt: user.createdAt,
+      },
+    });
+  } catch (error) {
+    console.error("GET /api/users/profile error:", error);
+    res.status(500).json({ message: "Failed to load profile" });
+  }
+});
+
+// Profile: PATCH /api/users/profile (name, image, phone, area, bio only — role/email locked)
+app.patch("/api/users/profile", async (req, res) => {
+  try {
+    const { email, name, image, phone, area, bio } = req.body || {};
+
+    const normalizedEmail = String(email || "").trim().toLowerCase();
+    if (!normalizedEmail) {
+      return res.status(400).json({ message: "User email is required" });
+    }
+
+    const trimmedName = String(name || "").trim();
+    if (trimmedName.length < 2) {
+      return res
+        .status(400)
+        .json({ message: "Name must be at least 2 characters" });
+    }
+
+    const trimmedImage = String(image || "").trim();
+    if (
+      trimmedImage &&
+      !trimmedImage.startsWith("http://") &&
+      !trimmedImage.startsWith("https://")
+    ) {
+      return res
+        .status(400)
+        .json({ message: "Photo URL must start with http:// or https://" });
+    }
+
+    const { users, services } = await getCollections();
+    const existingUser = await users.findOne({ email: normalizedEmail });
+
+    if (!existingUser) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const updateFields = {
+      name: trimmedName,
+      image: trimmedImage,
+      phone: String(phone || "").trim(),
+      area: String(area || "").trim(),
+      bio: String(bio || "").trim(),
+      updatedAt: new Date(),
+    };
+
+    await users.updateOne(
+      { email: existingUser.email },
+      { $set: updateFields }
+    );
+
+    // Keep technicianName synced on their service listings if name changed
+    if (
+      (existingUser.role || "").toLowerCase() === "technician" &&
+      trimmedName !== existingUser.name
+    ) {
+      await services.updateMany(
+        { technicianEmail: existingUser.email },
+        { $set: { technicianName: trimmedName } }
+      );
+    }
+
+    res.json({
+      message: "Profile updated successfully",
+      user: {
+        _id: existingUser._id,
+        email: existingUser.email,
+        role: existingUser.role || "customer",
+        ...updateFields,
+      },
+    });
+  } catch (error) {
+    console.error("PATCH /api/users/profile error:", error);
+    res.status(500).json({ message: "Failed to update profile" });
+  }
+});
+
 if (!process.env.VERCEL) {
   app.listen(port, () => {
     console.log(`FixMate server running on http://localhost:${port}`);
