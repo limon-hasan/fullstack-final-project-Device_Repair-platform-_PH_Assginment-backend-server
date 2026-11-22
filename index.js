@@ -95,6 +95,46 @@ app.get("/api/services", async (req, res) => {
   }
 });
 
+// Technician: GET /api/services/technician?email=...
+app.get("/api/services/technician", async (req, res) => {
+  try {
+    const email = String(req.query.email || "").trim().toLowerCase();
+    if (!email) {
+      return res.status(400).json({ message: "Technician email is required" });
+    }
+
+    const { services } = await getCollections();
+    const list = await services
+      .find({ technicianEmail: email })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    let approved = 0;
+    let pending = 0;
+    let rejected = 0;
+
+    for (const item of list) {
+      const status = (item.status || "pending").toLowerCase();
+      if (status === "approved") approved += 1;
+      else if (status === "rejected") rejected += 1;
+      else pending += 1;
+    }
+
+    res.json({
+      services: list,
+      stats: {
+        total: list.length,
+        approved,
+        pending,
+        rejected,
+      },
+    });
+  } catch (error) {
+    console.error("GET /api/services/technician error:", error);
+    res.status(500).json({ message: "Failed to load technician services" });
+  }
+});
+
 // Public: GET /api/services/:id (approved & available + technician summary)
 app.get("/api/services/:id", async (req, res) => {
   try {
@@ -516,6 +556,76 @@ app.get("/api/payments/customer", async (req, res) => {
   } catch (error) {
     console.error("GET /api/payments/customer error:", error);
     res.status(500).json({ message: "Failed to load payment history" });
+  }
+});
+
+// Technician: POST /api/services (creates new service with approvalStatus: "pending")
+app.post("/api/services", async (req, res) => {
+  try {
+    const title = String(req.body?.title || "").trim();
+    const category = String(req.body?.category || "").trim();
+    const description = String(req.body?.description || "").trim();
+    const image = String(req.body?.image || "").trim();
+    const basePrice = Number(req.body?.basePrice);
+    const estimatedDuration = String(
+      req.body?.estimatedDuration || "1-2 hours"
+    ).trim();
+    const serviceMode = String(
+      req.body?.serviceMode || "Home Visit"
+    ).trim();
+    const serviceArea = String(req.body?.serviceArea || "").trim();
+    const technicianName = String(
+      req.body?.technicianName || "Technician"
+    ).trim();
+    const technicianEmail = String(req.body?.technicianEmail || "")
+      .trim()
+      .toLowerCase();
+
+    if (!title || !category || !description || !technicianEmail) {
+      return res.status(400).json({
+        message:
+          "Title, category, description, and technicianEmail are required",
+      });
+    }
+
+    if (!Number.isFinite(basePrice) || basePrice <= 0) {
+      return res.status(400).json({
+        message: "Base price must be a positive number",
+      });
+    }
+
+    const { services } = await getCollections();
+    const now = new Date();
+
+    const newService = {
+      title,
+      category,
+      description,
+      image: image || "",
+      basePrice,
+      estimatedDuration,
+      serviceMode,
+      serviceArea,
+      technicianName,
+      technicianEmail,
+      approvalStatus: "pending",
+      isAvailable: true,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const result = await services.insertOne(newService);
+
+    res.status(201).json({
+      message: "Service submitted for admin approval",
+      service: {
+        _id: result.insertedId,
+        ...newService,
+      },
+    });
+  } catch (error) {
+    console.error("POST /api/services error:", error);
+    res.status(500).json({ message: "Failed to create service" });
   }
 });
 
