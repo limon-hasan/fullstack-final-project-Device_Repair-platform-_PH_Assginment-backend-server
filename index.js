@@ -498,6 +498,27 @@ app.patch("/api/bookings/:id/cancel", async (req, res) => {
   }
 });
 
+// Customer: GET /api/payments/customer?email=...
+app.get("/api/payments/customer", async (req, res) => {
+  try {
+    const email = String(req.query.email || "").trim().toLowerCase();
+    if (!email) {
+      return res.status(400).json({ message: "Customer email is required" });
+    }
+
+    const { payments } = await getCollections();
+    const list = await payments
+      .find({ customerEmail: email })
+      .sort({ paidAt: -1, createdAt: -1 })
+      .toArray();
+
+    res.json({ payments: list });
+  } catch (error) {
+    console.error("GET /api/payments/customer error:", error);
+    res.status(500).json({ message: "Failed to load payment history" });
+  }
+});
+
 if (!process.env.VERCEL) {
   app.listen(port, () => {
     console.log(`FixMate server running on http://localhost:${port}`);
