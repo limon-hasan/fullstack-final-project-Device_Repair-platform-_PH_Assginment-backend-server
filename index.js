@@ -393,6 +393,111 @@ app.patch("/api/users/profile", async (req, res) => {
   }
 });
 
+// Customer: GET /api/bookings/customer?email=...
+app.get("/api/bookings/customer", async (req, res) => {
+  try {
+    const email = String(req.query.email || "").trim().toLowerCase();
+    if (!email) {
+      return res.status(400).json({ message: "Customer email is required" });
+    }
+
+    const { bookings } = await getCollections();
+    const list = await bookings
+      .find({ customerEmail: email })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    const activeStatuses = new Set(["requested", "accepted", "in-progress"]);
+    let active = 0;
+    let completed = 0;
+    let unpaidCompleted = 0;
+    let totalSpent = 0;
+
+    for (const item of list) {
+      const status = (item.status || "").toLowerCase();
+      const paymentStatus = (item.paymentStatus || "unpaid").toLowerCase();
+
+      if (activeStatuses.has(status)) active += 1;
+      if (status === "completed") {
+        completed += 1;
+        if (paymentStatus !== "paid") unpaidCompleted += 1;
+      }
+      if (paymentStatus === "paid") {
+        totalSpent += Number(item.finalAmount ?? item.basePrice ?? 0);
+      }
+    }
+
+    res.json({
+      bookings: list,
+      stats: {
+        total: list.length,
+        active,
+        completed,
+        unpaidCompleted,
+        totalSpent,
+      },
+    });
+  } catch (error) {
+    console.error("GET /api/bookings/customer error:", error);
+    res.status(500).json({ message: "Failed to load customer bookings" });
+  }
+});
+
+// Customer: PATCH /api/bookings/:id/cancel (only own booking & only while "requested")
+app.patch("/api/bookings/:id/cancel", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const customerEmail = String(req.body?.customerEmail || "")
+      .trim()
+      .toLowerCase();
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ message: "Invalid booking ID" });
+    }
+
+    if (!customerEmail) {
+      return res.status(401).json({ message: "Customer email is required" });
+    }
+
+    const { bookings } = await getCollections();
+    const booking = await bookings.findOne({ _id: new ObjectId(id) });
+
+    if (!booking) {
+      return res.status(404).json({ message: "Booking not found" });
+    }
+
+    if ((booking.customerEmail || "").toLowerCase() !== customerEmail) {
+      return res
+        .status(403)
+        .json({ message: "You can only cancel your own repair requests" });
+    }
+
+    if ((booking.status || "").toLowerCase() !== "requested") {
+      return res.status(400).json({
+        message: "Only requests in 'requested' status can be cancelled",
+      });
+    }
+
+    const updatedAt = new Date();
+    await bookings.updateOne(
+      { _id: booking._id },
+      { $set: { status: "cancelled", updatedAt } }
+    );
+
+    res.json({
+      message: "Repair request cancelled successfully",
+      booking: {
+        ...booking,
+        status: "cancelled",
+        updatedAt,
+      },
+    });
+  } catch (error) {
+    console.error("PATCH /api/bookings/:id/cancel error:", error);
+    res.status(500).json({ message: "Failed to cancel repair request" });
+  }
+});
+
 if (!process.env.VERCEL) {
   app.listen(port, () => {
     console.log(`FixMate server running on http://localhost:${port}`);
