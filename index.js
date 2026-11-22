@@ -135,6 +135,141 @@ app.get("/api/services/:id", async (req, res) => {
   }
 });
 
+// Bookings: POST /api/bookings (create a new repair request)
+app.post("/api/bookings", async (req, res) => {
+  try {
+    const {
+      serviceId,
+      customerName,
+      customerEmail,
+      customerPhone,
+      address,
+      preferredDate,
+      problemDescription,
+    } = req.body || {};
+
+    if (!serviceId || !ObjectId.isValid(serviceId)) {
+      return res.status(400).json({ message: "Invalid service ID" });
+    }
+
+    if (!customerEmail || typeof customerEmail !== "string") {
+      return res
+        .status(401)
+        .json({ message: "Customer authentication required" });
+    }
+
+    if (!customerPhone || String(customerPhone).trim().length < 7) {
+      return res
+        .status(400)
+        .json({ message: "Please provide a valid phone number" });
+    }
+
+    if (!address || String(address).trim().length < 5) {
+      return res
+        .status(400)
+        .json({ message: "Please provide a valid service address" });
+    }
+
+    if (!preferredDate) {
+      return res
+        .status(400)
+        .json({ message: "Please choose a preferred date" });
+    }
+
+    const dateOnly = String(preferredDate).slice(0, 10);
+    const parsedDate = new Date(preferredDate);
+    const endOfPreferredDay = new Date(`${dateOnly}T23:59:59.999Z`);
+    if (
+      Number.isNaN(parsedDate.getTime()) ||
+      Number.isNaN(endOfPreferredDay.getTime()) ||
+      endOfPreferredDay < new Date()
+    ) {
+      return res
+        .status(400)
+        .json({ message: "Preferred date must be today or a future date" });
+    }
+
+    if (!problemDescription || String(problemDescription).trim().length < 20) {
+      return res.status(400).json({
+        message: "Problem description must be at least 20 characters",
+      });
+    }
+
+    const { users, services, bookings } = await getCollections();
+    const normalizedEmail = customerEmail.trim().toLowerCase();
+
+    // Verify customer role from DB
+    const dbUser = await users.findOne({ email: normalizedEmail });
+    const userRole = (dbUser?.role || "").toLowerCase();
+    if (!dbUser || userRole !== "customer") {
+      return res
+        .status(403)
+        .json({ message: "Only customers can request a repair" });
+    }
+
+    // Verify service exists, is approved, and is available
+    const service = await services.findOne({
+      _id: new ObjectId(serviceId),
+      approvalStatus: "approved",
+      isAvailable: true,
+    });
+
+    if (!service) {
+      return res
+        .status(404)
+        .json({ message: "Service is not available for booking" });
+    }
+
+    // Prevent duplicate active requests (requested, accepted, in-progress)
+    const existingActiveBooking = await bookings.findOne({
+      serviceId: String(service._id),
+      customerEmail: dbUser.email,
+      status: { $in: ["requested", "accepted", "in-progress"] },
+    });
+
+    if (existingActiveBooking) {
+      return res.status(409).json({
+        message: "You already have an active request for this service",
+      });
+    }
+
+    const basePrice = Number(service.basePrice) || 0;
+
+    const newBooking = {
+      serviceId: String(service._id),
+      serviceTitle: service.title,
+      serviceImage: service.image || "",
+      category: service.category,
+      basePrice,
+      technicianName: service.technicianName,
+      technicianEmail: service.technicianEmail,
+      customerName: dbUser.name || String(customerName || "").trim(),
+      customerEmail: dbUser.email,
+      customerPhone: String(customerPhone).trim(),
+      address: String(address).trim(),
+      preferredDate: parsedDate,
+      problemDescription: String(problemDescription).trim(),
+      status: "requested",
+      finalAmount: basePrice,
+      paymentStatus: "unpaid",
+      createdAt: new Date(),
+    };
+
+    const result = await bookings.insertOne(newBooking);
+
+    res.status(201).json({
+      message: "Repair request submitted successfully",
+      booking: {
+        _id: result.insertedId,
+        ...newBooking,
+      },
+    });
+  } catch (error) {
+    console.error("POST /api/bookings error:", error);
+    res.status(500).json({ message: "Failed to submit repair request" });
+  }
+});
+
 if (!process.env.VERCEL) {
   app.listen(port, () => {
     console.log(`FixMate server running on http://localhost:${port}`);
