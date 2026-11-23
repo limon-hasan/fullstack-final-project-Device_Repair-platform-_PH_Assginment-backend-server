@@ -108,7 +108,9 @@ app.get("/api/services", async (req, res) => {
     const limit = Number.parseInt(req.query.limit, 10);
     const search = String(req.query.search || "").trim();
     const category = String(req.query.category || "").trim();
-    const serviceMode = String(req.query.serviceMode || "").trim();
+    const serviceMode = String(
+      req.query.serviceMode || req.query.mode || "",
+    ).trim();
     const sort = String(req.query.sort || "newest")
       .trim()
       .toLowerCase();
@@ -120,7 +122,12 @@ app.get("/api/services", async (req, res) => {
 
     if (search) {
       const regex = new RegExp(escapeRegex(search), "i");
-      query.$or = [{ title: regex }, { category: regex }];
+      query.$or = [
+        { title: regex },
+        { category: regex },
+        { serviceArea: regex },
+        { technicianName: regex },
+      ];
     }
 
     if (category && category.toLowerCase() !== "all") {
@@ -1291,6 +1298,7 @@ app.get("/api/admin/overview", async (req, res) => {
     let pendingServices = 0;
     let rejectedServices = 0;
     const recentPendingServices = [];
+    const categoryCounts = {};
 
     for (const s of allServices) {
       const approval = String(
@@ -1305,15 +1313,30 @@ app.get("/api/admin/overview", async (req, res) => {
           recentPendingServices.push(s);
         }
       }
+
+      const cat = String(s.category || "Other").trim() || "Other";
+      categoryCounts[cat] = (categoryCounts[cat] || 0) + 1;
     }
 
     let activeBookings = 0;
     let completedBookings = 0;
     let paidBookings = 0;
     let totalRevenue = 0;
+    const bookingStatusCounts = {
+      requested: 0,
+      accepted: 0,
+      "in-progress": 0,
+      completed: 0,
+      cancelled: 0,
+      rejected: 0,
+    };
 
     for (const b of allBookings) {
       const status = String(b.status || "requested").toLowerCase();
+      if (bookingStatusCounts[status] !== undefined) {
+        bookingStatusCounts[status] += 1;
+      }
+
       if (
         status === "requested" ||
         status === "accepted" ||
@@ -1330,6 +1353,10 @@ app.get("/api/admin/overview", async (req, res) => {
       }
     }
 
+    const servicesByCategory = Object.entries(categoryCounts)
+      .map(([category, count]) => ({ category, count }))
+      .sort((a, b) => b.count - a.count);
+
     res.json({
       stats: {
         totalUsers: allUsers.length,
@@ -1345,6 +1372,10 @@ app.get("/api/admin/overview", async (req, res) => {
         completedBookings,
         paidBookings,
         totalRevenue,
+      },
+      charts: {
+        bookingStatusCounts,
+        servicesByCategory,
       },
       recentPendingServices,
       recentBookings: allBookings.slice(0, 5),
