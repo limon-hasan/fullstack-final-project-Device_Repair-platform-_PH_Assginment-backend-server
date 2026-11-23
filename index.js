@@ -67,11 +67,87 @@ async function getCollections() {
   const db = await getDb();
   return {
     users: db.collection("user"),
+    sessions: db.collection("session"),
     services: db.collection("services"),
     bookings: db.collection("bookings"),
     payments: db.collection("payments"),
   };
 }
+
+// ==================== Auth & Role Middlewares ====================
+
+const verifyToken = async (req, res, next) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return res
+        .status(401)
+        .json({ message: "Unauthorized: Missing Bearer token" });
+    }
+
+    const token = authHeader.split(" ")[1]?.trim();
+    if (!token) {
+      return res.status(401).json({ message: "Unauthorized: Token not found" });
+    }
+
+    const { sessions, users } = await getCollections();
+    const session = await sessions.findOne({ token });
+
+    if (!session) {
+      return res.status(401).json({ message: "Unauthorized: Invalid token" });
+    }
+
+    if (session.expiresAt && new Date(session.expiresAt) < new Date()) {
+      return res.status(401).json({ message: "Unauthorized: Session expired" });
+    }
+
+    const userId = session.userId;
+    const userQuery = ObjectId.isValid(userId)
+      ? { _id: new ObjectId(userId) }
+      : { _id: userId };
+
+    const user = await users.findOne(userQuery);
+    if (!user) {
+      return res.status(401).json({ message: "Unauthorized: User not found" });
+    }
+
+    req.user = {
+      ...user,
+      email: String(user.email || "")
+        .trim()
+        .toLowerCase(),
+      role: String(user.role || "customer")
+        .trim()
+        .toLowerCase(),
+    };
+    next();
+  } catch (error) {
+    console.error("verifyToken error:", error);
+    return res.status(401).json({ message: "Unauthorized" });
+  }
+};
+
+// Must be called after verifyToken
+const verifyCustomer = (req, res, next) => {
+  if (req.user?.role !== "customer") {
+    return res.status(403).json({ message: "Forbidden: Customers only" });
+  }
+  next();
+};
+
+const verifyTechnician = (req, res, next) => {
+  if (req.user?.role !== "technician") {
+    return res.status(403).json({ message: "Forbidden: Technicians only" });
+  }
+  next();
+};
+
+const verifyAdmin = (req, res, next) => {
+  if (req.user?.role !== "admin") {
+    return res.status(403).json({ message: "Forbidden: Admins only" });
+  }
+  next();
+};
 
 function escapeRegex(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
