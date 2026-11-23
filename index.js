@@ -2,6 +2,14 @@ import express from "express";
 import cors from "cors";
 import "dotenv/config";
 import { MongoClient, ObjectId } from "mongodb";
+import Stripe from "stripe";
+
+const stripe = process.env.STRIPE_SECRET_KEY
+  ? new Stripe(process.env.STRIPE_SECRET_KEY)
+  : null;
+const STRIPE_CURRENCY = String(process.env.STRIPE_CURRENCY || "usd")
+  .trim()
+  .toLowerCase();
 
 const app = express();
 const port = process.env.PORT || 8000;
@@ -905,6 +913,215 @@ app.get("/api/payments/customer", async (req, res) => {
   } catch (error) {
     console.error("GET /api/payments/customer error:", error);
     res.status(500).json({ message: "Failed to load payment history" });
+  }
+});
+
+// Customer: POST /api/payments/create-checkout-session
+app.post("/api/payments/create-checkout-session", async (req, res) => {
+  try {
+    if (!stripe) {
+      return res.status(503).json({
+        message: "Stripe is not configured yet (missing STRIPE_SECRET_KEY)",
+      });
+    }
+
+    const bookingId = String(req.body?.bookingId || "").trim();
+    const customerEmail = String(req.body?.customerEmail || "")
+      .trim()
+      .toLowerCase();
+
+    if (!bookingId || !ObjectId.isValid(bookingId)) {
+      return res.status(400).json({ message: "Invalid booking ID" });
+    }
+
+    if (!customerEmail) {
+      return res.status(401).json({ message: "Customer email is required" });
+    }
+
+    const { bookings } = await getCollections();
+    const booking = await bookings.findOne({ _id: new ObjectId(bookingId) });
+
+    if (!booking) {
+      return res.status(404).json({ message: "Booking not found" });
+    }
+
+    if (String(booking.customerEmail || "").toLowerCase() !== customerEmail) {
+      return res
+        .status(403)
+        .json({ message: "You can only pay for your own bookings" });
+    }
+
+    if (String(booking.status || "").toLowerCase() !== "completed") {
+      return res.status(400).json({
+        message: "Payment is only available after the repair is completed",
+      });
+    }
+
+    if (String(booking.paymentStatus || "").toLowerCase() === "paid") {
+      return res
+        .status(400)
+        .json({ message: "This booking has already been paid" });
+    }
+
+    const amount = Number(booking.finalAmount ?? booking.basePrice ?? 0);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return res.status(400).json({ message: "Invalid booking amount" });
+    }
+
+    const unitAmount = Math.round(amount * 100);
+    const originHeader = String(req.headers.origin || "").trim();
+    const baseUrl =
+      originHeader ||
+      (process.env.CLIENT_URL || "http://localhost:3000")
+        .split(",")[0]
+        .trim()
+        .replace(/\/+$/, "");
+
+    const session = await stripe.checkout.sessions.create({
+      mode: "payment",
+      customer_email: customerEmail,
+      line_items: [
+        {
+          price_data: {
+            currency: STRIPE_CURRENCY,
+            product_data: {
+              name: booking.serviceTitle || "FixMate Repair Service",
+              description: booking.technicianName
+                ? `Technician: ${booking.technicianName}`
+                : "Verified FixMate repair service",
+            },
+            unit_amount: unitAmount,
+          },
+          quantity: 1,
+        },
+      ],
+      metadata: {
+        bookingId: String(booking._id),
+        customerEmail,
+        technicianEmail: String(booking.technicianEmail || "").toLowerCase(),
+      },
+      success_url: `${baseUrl}/dashboard/customer/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${baseUrl}/dashboard/customer/bookings?payment=cancelled`,
+    });
+
+    res.json({
+      url: session.url,
+      sessionId: session.id,
+    });
+  } catch (error) {
+    console.error("POST /api/payments/create-checkout-session error:", error);
+    res.status(500).json({
+      message: error?.message || "Failed to create Stripe checkout session",
+    });
+  }
+});
+
+// Customer: POST /api/payments/verify-session
+app.post("/api/payments/verify-session", async (req, res) => {
+  try {
+    if (!stripe) {
+      return res.status(503).json({
+        message: "Stripe is not configured yet (missing STRIPE_SECRET_KEY)",
+      });
+    }
+
+    const sessionId = String(req.body?.sessionId || "").trim();
+    if (!sessionId) {
+      return res
+        .status(400)
+        .json({ message: "Stripe checkout session ID is required" });
+    }
+
+    const checkoutSession = await stripe.checkout.sessions.retrieve(sessionId);
+
+    if (checkoutSession.payment_status !== "paid") {
+      return res.status(400).json({
+        message: "Payment has not been completed yet",
+      });
+    }
+
+    const bookingId = String(checkoutSession.metadata?.bookingId || "").trim();
+    if (!bookingId || !ObjectId.isValid(bookingId)) {
+      return res
+        .status(400)
+        .json({ message: "Missing booking reference in session" });
+    }
+
+    const { bookings, payments } = await getCollections();
+    const booking = await bookings.findOne({ _id: new ObjectId(bookingId) });
+
+    if (!booking) {
+      return res.status(404).json({ message: "Booking not found" });
+    }
+
+    const paidAmount = Number(
+      (checkoutSession.amount_total ?? 0) / 100 ||
+        booking.finalAmount ||
+        booking.basePrice ||
+        0,
+    );
+    const transactionId =
+      typeof checkoutSession.payment_intent === "string"
+        ? checkoutSession.payment_intent
+        : checkoutSession.id;
+    const currency = String(
+      checkoutSession.currency || STRIPE_CURRENCY,
+    ).toUpperCase();
+
+    // Avoid duplicate payment records on page refresh
+    const existingPayment = await payments.findOne({
+      stripeSessionId: checkoutSession.id,
+    });
+
+    const paidAt = existingPayment?.paidAt || booking.paidAt || new Date();
+
+    if (!existingPayment) {
+      await payments.insertOne({
+        bookingId: String(booking._id),
+        stripeSessionId: checkoutSession.id,
+        transactionId,
+        serviceTitle: booking.serviceTitle || "Repair Service",
+        customerName: booking.customerName || "",
+        customerEmail: String(
+          booking.customerEmail || checkoutSession.customer_email || "",
+        ).toLowerCase(),
+        technicianName: booking.technicianName || "",
+        technicianEmail: String(booking.technicianEmail || "").toLowerCase(),
+        amount: paidAmount,
+        currency,
+        status: "paid",
+        paidAt,
+        createdAt: new Date(),
+      });
+    }
+
+    await bookings.updateOne(
+      { _id: booking._id },
+      {
+        $set: {
+          paymentStatus: "paid",
+          paidAmount,
+          transactionId,
+          paidAt,
+        },
+      },
+    );
+
+    res.json({
+      message: "Payment verified successfully",
+      bookingId: String(booking._id),
+      serviceTitle: booking.serviceTitle || "Repair Service",
+      technicianName: booking.technicianName || "Technician",
+      transactionId,
+      amount: paidAmount,
+      currency,
+      paidAt,
+    });
+  } catch (error) {
+    console.error("POST /api/payments/verify-session error:", error);
+    res.status(500).json({
+      message: error?.message || "Failed to verify Stripe payment",
+    });
   }
 });
 
