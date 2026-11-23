@@ -1260,6 +1260,286 @@ app.patch("/api/admin/services/:id/approval", async (req, res) => {
   }
 });
 
+// Admin: GET /api/admin/users?role=all|customer|technician|admin&search=...
+app.get("/api/admin/users", async (req, res) => {
+  try {
+    const roleFilter = String(req.query.role || "all")
+      .trim()
+      .toLowerCase();
+    const search = String(req.query.search || "")
+      .trim()
+      .toLowerCase();
+
+    const { users } = await getCollections();
+    const allUsers = await users
+      .find(
+        {},
+        {
+          projection: {
+            name: 1,
+            email: 1,
+            image: 1,
+            role: 1,
+            phone: 1,
+            area: 1,
+            bio: 1,
+            createdAt: 1,
+            updatedAt: 1,
+          },
+        },
+      )
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    let customers = 0;
+    let technicians = 0;
+    let admins = 0;
+
+    for (const u of allUsers) {
+      const r = String(u.role || "customer").toLowerCase();
+      if (r === "technician") technicians += 1;
+      else if (r === "admin") admins += 1;
+      else customers += 1;
+    }
+
+    const filtered = allUsers.filter((u) => {
+      const r = String(u.role || "customer").toLowerCase();
+      const matchesRole = roleFilter === "all" || r === roleFilter;
+      if (!matchesRole) return false;
+
+      if (!search) return true;
+      const haystack = [u.name, u.email, u.phone, u.area, r]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+
+      return haystack.includes(search);
+    });
+
+    res.json({
+      users: filtered,
+      stats: {
+        total: allUsers.length,
+        customers,
+        technicians,
+        admins,
+      },
+    });
+  } catch (error) {
+    console.error("GET /api/admin/users error:", error);
+    res.status(500).json({ message: "Failed to load users list" });
+  }
+});
+
+// Admin: PATCH /api/admin/users/:id/role (cannot change own role)
+app.patch("/api/admin/users/:id/role", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const nextRole = String(req.body?.role || "")
+      .trim()
+      .toLowerCase();
+    const adminEmail = String(req.body?.adminEmail || "")
+      .trim()
+      .toLowerCase();
+
+    const allowedRoles = ["customer", "technician", "admin"];
+    if (!allowedRoles.includes(nextRole)) {
+      return res.status(400).json({
+        message: 'Role must be "customer", "technician", or "admin"',
+      });
+    }
+
+    const { users } = await getCollections();
+
+    // Better Auth MongoDB adapter may store _id as ObjectId or string
+    const idQuery = ObjectId.isValid(id)
+      ? { $or: [{ _id: new ObjectId(id) }, { _id: id }, { id }] }
+      : { $or: [{ _id: id }, { id }] };
+
+    const targetUser = await users.findOne(idQuery);
+
+    if (!targetUser) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    if (
+      adminEmail &&
+      String(targetUser.email || "").toLowerCase() === adminEmail
+    ) {
+      return res.status(400).json({
+        message: "Admins cannot change their own role",
+      });
+    }
+
+    const updated = await users.findOneAndUpdate(
+      { _id: targetUser._id },
+      {
+        $set: {
+          role: nextRole,
+          updatedAt: new Date(),
+        },
+      },
+      {
+        returnDocument: "after",
+        projection: {
+          name: 1,
+          email: 1,
+          image: 1,
+          role: 1,
+          phone: 1,
+          area: 1,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      },
+    );
+
+    res.json({
+      message: `User role updated to ${nextRole}`,
+      user: updated,
+    });
+  } catch (error) {
+    console.error("PATCH /api/admin/users/:id/role error:", error);
+    res.status(500).json({ message: "Failed to update user role" });
+  }
+});
+
+// Admin: GET /api/admin/bookings?status=all|requested|...&paymentStatus=all|paid|unpaid&search=...
+app.get("/api/admin/bookings", async (req, res) => {
+  try {
+    const statusFilter = String(req.query.status || "all")
+      .trim()
+      .toLowerCase();
+    const paymentFilter = String(req.query.paymentStatus || "all")
+      .trim()
+      .toLowerCase();
+    const search = String(req.query.search || "")
+      .trim()
+      .toLowerCase();
+
+    const { bookings } = await getCollections();
+    const allBookings = await bookings
+      .find({})
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    let requested = 0;
+    let accepted = 0;
+    let inProgress = 0;
+    let completed = 0;
+    let cancelled = 0;
+    let rejected = 0;
+    let paid = 0;
+
+    for (const b of allBookings) {
+      const s = String(b.status || "requested").toLowerCase();
+      if (s === "requested") requested += 1;
+      else if (s === "accepted") accepted += 1;
+      else if (s === "in-progress") inProgress += 1;
+      else if (s === "completed") completed += 1;
+      else if (s === "cancelled") cancelled += 1;
+      else if (s === "rejected") rejected += 1;
+
+      if (String(b.paymentStatus || "").toLowerCase() === "paid") {
+        paid += 1;
+      }
+    }
+
+    const filtered = allBookings.filter((b) => {
+      const s = String(b.status || "requested").toLowerCase();
+      const p = String(b.paymentStatus || "unpaid").toLowerCase();
+
+      if (statusFilter !== "all" && s !== statusFilter) return false;
+      if (paymentFilter !== "all" && p !== paymentFilter) return false;
+
+      if (!search) return true;
+      const haystack = [
+        b.serviceTitle,
+        b.category,
+        b.customerName,
+        b.customerEmail,
+        b.technicianName,
+        b.technicianEmail,
+        b.address,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+
+      return haystack.includes(search);
+    });
+
+    res.json({
+      bookings: filtered,
+      stats: {
+        total: allBookings.length,
+        requested,
+        accepted,
+        inProgress,
+        completed,
+        cancelled,
+        rejected,
+        paid,
+        unpaid: allBookings.length - paid,
+      },
+    });
+  } catch (error) {
+    console.error("GET /api/admin/bookings error:", error);
+    res.status(500).json({ message: "Failed to load platform bookings" });
+  }
+});
+
+// Admin: GET /api/admin/payments?search=...
+app.get("/api/admin/payments", async (req, res) => {
+  try {
+    const search = String(req.query.search || "")
+      .trim()
+      .toLowerCase();
+
+    const { payments } = await getCollections();
+    const allPayments = await payments
+      .find({})
+      .sort({ paidAt: -1, createdAt: -1 })
+      .toArray();
+
+    let totalRevenue = 0;
+    for (const p of allPayments) {
+      totalRevenue += Number(p.amount || 0);
+    }
+
+    const filtered = allPayments.filter((p) => {
+      if (!search) return true;
+      const haystack = [
+        p.transactionId,
+        p.stripeSessionId,
+        p.serviceTitle,
+        p.customerName,
+        p.customerEmail,
+        p.technicianName,
+        p.technicianEmail,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+
+      return haystack.includes(search);
+    });
+
+    res.json({
+      payments: filtered,
+      stats: {
+        totalTransactions: allPayments.length,
+        totalRevenue,
+        averageAmount:
+          allPayments.length > 0 ? totalRevenue / allPayments.length : 0,
+      },
+    });
+  } catch (error) {
+    console.error("GET /api/admin/payments error:", error);
+    res.status(500).json({ message: "Failed to load payment transactions" });
+  }
+});
+
 if (!process.env.VERCEL) {
   app.listen(port, () => {
     console.log(`FixMate server running on http://localhost:${port}`);
