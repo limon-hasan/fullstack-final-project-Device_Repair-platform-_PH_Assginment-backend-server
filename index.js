@@ -1000,8 +1000,8 @@ app.post("/api/payments/create-checkout-session", async (req, res) => {
         customerEmail,
         technicianEmail: String(booking.technicianEmail || "").toLowerCase(),
       },
-      success_url: `${baseUrl}/dashboard/customer/payment-success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${baseUrl}/dashboard/customer/bookings?payment=cancelled`,
+      success_url: `${baseUrl}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${baseUrl}/payment/cancel`,
     });
 
     res.json({
