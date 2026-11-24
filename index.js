@@ -47,6 +47,51 @@ app.use(
     credentials: true,
   }),
 );
+// Stripe Webhook (MUST be placed BEFORE app.use(express.json()))
+app.post(
+  "/api/payments/webhook",
+  express.raw({ type: "application/json" }),
+  async (req, res) => {
+    if (!stripe || !process.env.STRIPE_WEBHOOK_SECRET) {
+      return res.status(503).json({
+        message: "Stripe webhook is not configured on the server",
+      });
+    }
+
+    const signature = req.headers["stripe-signature"];
+    if (!signature) {
+      return res.status(400).send("Missing stripe-signature header");
+    }
+
+    let event;
+    try {
+      event = stripe.webhooks.constructEvent(
+        req.body,
+        signature,
+        process.env.STRIPE_WEBHOOK_SECRET,
+      );
+    } catch (err) {
+      console.error(
+        "Stripe webhook signature verification failed:",
+        err.message,
+      );
+      return res.status(400).send(`Webhook Error: ${err.message}`);
+    }
+
+    try {
+      if (event.type === "checkout.session.completed") {
+        const checkoutSession = event.data.object;
+        if (checkoutSession.payment_status === "paid") {
+          await recordPaidCheckoutSession(checkoutSession);
+        }
+      }
+      return res.json({ received: true });
+    } catch (error) {
+      console.error("Stripe webhook handler error:", error);
+      return res.status(500).json({ message: "Webhook handler failed" });
+    }
+  },
+);
 
 app.use(express.json());
 
@@ -55,10 +100,21 @@ let dbPromise = null;
 
 async function getDb() {
   if (!dbPromise) {
-    dbPromise = client.connect().then(() => {
-      console.log("Connected to MongoDB (fixmatedb)");
-      return client.db("fixmatedb");
-    });
+    dbPromise = client
+      .connect()
+      .then(async () => {
+        console.log("Connected to MongoDB (fixmatedb)");
+        const db = client.db("fixmatedb");
+        await db
+          .collection("payments")
+          .createIndex({ stripeSessionId: 1 }, { unique: true, sparse: true })
+          .catch(() => {});
+        return db;
+      })
+      .catch((err) => {
+        dbPromise = null;
+        throw err;
+      });
   }
   return dbPromise;
 }
@@ -455,9 +511,14 @@ app.patch(
         return res.status(404).json({ message: "Service not found" });
       }
 
-      if (
-        String(existing.technicianEmail || "").toLowerCase() !== req.user.email
-      ) {
+      const ownerEmail = String(existing.technicianEmail || "")
+        .trim()
+        .toLowerCase();
+      const requesterEmail = String(req.user?.email || "")
+        .trim()
+        .toLowerCase();
+
+      if (ownerEmail !== requesterEmail) {
         return res.status(403).json({
           message: "Forbidden: You can only update your own services",
         });
@@ -556,6 +617,7 @@ app.patch(
 
       if (hasContentEdits) {
         updateFields.approvalStatus = "pending";
+        updateFields.rejectionReason = "";
       }
 
       const updated = await services.findOneAndUpdate(
@@ -578,7 +640,6 @@ app.patch(
     }
   },
 );
-
 // Technician: DELETE /api/services/:id
 app.delete(
   "/api/services/:id",
@@ -1127,6 +1188,111 @@ app.post(
   },
 );
 
+// Shared helper used by both Stripe Webhook and /api/payments/verify-session
+async function recordPaidCheckoutSession(
+  checkoutSession,
+  { expectedCustomerEmail = "", fallbackName = "" } = {},
+) {
+  const bookingId = String(checkoutSession.metadata?.bookingId || "").trim();
+  if (!bookingId || !ObjectId.isValid(bookingId)) {
+    const err = new Error("Missing booking reference in session");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const { bookings, payments } = await getCollections();
+  const booking = await bookings.findOne({ _id: new ObjectId(bookingId) });
+
+  if (!booking) {
+    const err = new Error("Booking not found");
+    err.statusCode = 404;
+    throw err;
+  }
+
+  const bookingCustomerEmail = String(booking.customerEmail || "")
+    .trim()
+    .toLowerCase();
+
+  if (expectedCustomerEmail && bookingCustomerEmail !== expectedCustomerEmail) {
+    const err = new Error("Forbidden: You can only verify your own payment");
+    err.statusCode = 403;
+    throw err;
+  }
+
+  const paidAmount = Number(
+    (checkoutSession.amount_total ?? 0) / 100 ||
+      booking.finalAmount ||
+      booking.basePrice ||
+      0,
+  );
+  const transactionId =
+    typeof checkoutSession.payment_intent === "string"
+      ? checkoutSession.payment_intent
+      : checkoutSession.id;
+  const currency = String(
+    checkoutSession.currency || STRIPE_CURRENCY,
+  ).toLowerCase();
+  const now = new Date();
+
+  // Atomic upsert prevents duplicate records even if webhook & success page run at the exact same time
+  try {
+    await payments.updateOne(
+      { stripeSessionId: checkoutSession.id },
+      {
+        $setOnInsert: {
+          bookingId: String(booking._id),
+          stripeSessionId: checkoutSession.id,
+          transactionId,
+          serviceTitle: booking.serviceTitle || "Repair Service",
+          customerName: booking.customerName || fallbackName || "",
+          customerEmail: bookingCustomerEmail,
+          technicianName: booking.technicianName || "",
+          technicianEmail: String(booking.technicianEmail || "")
+            .trim()
+            .toLowerCase(),
+          amount: paidAmount,
+          currency,
+          status: "paid",
+          paymentStatus: "paid",
+          paidAt: booking.paidAt || now,
+          createdAt: now,
+        },
+      },
+      { upsert: true },
+    );
+  } catch (err) {
+    // Ignore race-condition duplicate key error on unique stripeSessionId
+    if (err?.code !== 11000) throw err;
+  }
+
+  const savedPayment = await payments.findOne({
+    stripeSessionId: checkoutSession.id,
+  });
+  const paidAt = savedPayment?.paidAt || booking.paidAt || now;
+
+  await bookings.updateOne(
+    { _id: booking._id },
+    {
+      $set: {
+        paymentStatus: "paid",
+        paidAmount,
+        transactionId,
+        paidAt,
+      },
+    },
+  );
+
+  return {
+    bookingId: String(booking._id),
+    serviceTitle: booking.serviceTitle || "Repair Service",
+    technicianName: booking.technicianName || "Technician",
+    transactionId,
+    amount: paidAmount,
+    currency: currency.toUpperCase(),
+    paidAt,
+  };
+}
+
 // Customer: POST /api/payments/verify-session
 app.post(
   "/api/payments/verify-session",
@@ -1156,95 +1322,18 @@ app.post(
         });
       }
 
-      const bookingId = String(
-        checkoutSession.metadata?.bookingId || "",
-      ).trim();
-      if (!bookingId || !ObjectId.isValid(bookingId)) {
-        return res
-          .status(400)
-          .json({ message: "Missing booking reference in session" });
-      }
-
-      const { bookings, payments } = await getCollections();
-      const booking = await bookings.findOne({ _id: new ObjectId(bookingId) });
-
-      if (!booking) {
-        return res.status(404).json({ message: "Booking not found" });
-      }
-
-      if (
-        String(booking.customerEmail || "").toLowerCase() !== req.user.email
-      ) {
-        return res
-          .status(403)
-          .json({ message: "Forbidden: You can only verify your own payment" });
-      }
-
-      const paidAmount = Number(
-        (checkoutSession.amount_total ?? 0) / 100 ||
-          booking.finalAmount ||
-          booking.basePrice ||
-          0,
-      );
-      const transactionId =
-        typeof checkoutSession.payment_intent === "string"
-          ? checkoutSession.payment_intent
-          : checkoutSession.id;
-      const currency = String(
-        checkoutSession.currency || STRIPE_CURRENCY,
-      ).toUpperCase();
-
-      // Avoid duplicate payment records on page refresh
-      const existingPayment = await payments.findOne({
-        stripeSessionId: checkoutSession.id,
+      const result = await recordPaidCheckoutSession(checkoutSession, {
+        expectedCustomerEmail: req.user.email,
+        fallbackName: req.user.name || "",
       });
-
-      const paidAt = existingPayment?.paidAt || booking.paidAt || new Date();
-
-      if (!existingPayment) {
-        await payments.insertOne({
-          bookingId: String(booking._id),
-          stripeSessionId: checkoutSession.id,
-          transactionId,
-          serviceTitle: booking.serviceTitle || "Repair Service",
-          customerName: booking.customerName || req.user.name || "",
-          customerEmail: req.user.email,
-          technicianName: booking.technicianName || "",
-          technicianEmail: String(booking.technicianEmail || "").toLowerCase(),
-          amount: paidAmount,
-          currency,
-          status: "paid",
-          paymentStatus: "paid",
-          paidAt,
-          createdAt: new Date(),
-        });
-      }
-
-      await bookings.updateOne(
-        { _id: booking._id },
-        {
-          $set: {
-            paymentStatus: "paid",
-            paidAmount,
-            transactionId,
-            paidAt,
-          },
-        },
-      );
 
       res.json({
         message: "Payment verified successfully",
-        bookingId: String(booking._id),
-        serviceTitle: booking.serviceTitle || "Repair Service",
-        technicianName: booking.technicianName || "Technician",
-        transactionId,
-        amount: paidAmount,
-        currency,
-        paidAt,
+        ...result,
       });
     } catch (error) {
       console.error("POST /api/payments/verify-session error:", error);
-      res.status(500).json({
+      res.status(error?.statusCode || 500).json({
         message: error?.message || "Failed to verify Stripe payment",
       });
     }
