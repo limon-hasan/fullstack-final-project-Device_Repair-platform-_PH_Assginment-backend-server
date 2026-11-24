@@ -1,8 +1,3 @@
----
-
-## ২. Backend (Server) `README.md`
-
-```markdown
 # FixMate — Repair Service Marketplace API (Server)
 
 ![Node.js](https://img.shields.io/badge/Node.js-Runtime-339933?style=for-the-badge&logo=nodedotjs&logoColor=white)
@@ -19,10 +14,10 @@ The RESTful backend server powering **FixMate**, a smart device and home applian
 
 | Resource | Link |
 | :--- | :--- |
-| **Live Server API** | https://fullstack-final-project-device-repa.vercel.app |
-| **Live Client App** | https://fullstack-final-project-device-repa-ebon.vercel.app |
-| **Server Repository** | https://github.com/limon-hasan/fullstack-final-project-Device_Repair-platform-_PH_Assginment-backend-server |
-| **Client Repository** | https://github.com/limon-hasan/fullstack-final-project-Device_Repair-platform-_PH_Assginment-frontend-client |
+| **Live Server API** | [https://fullstack-final-project-device-repa.vercel.app](https://fullstack-final-project-device-repa.vercel.app) |
+| **Live Client App** | [https://fullstack-final-project-device-repa-ebon.vercel.app](https://fullstack-final-project-device-repa-ebon.vercel.app) |
+| **Server Repository** | [https://github.com/limon-hasan/fullstack-final-project-Device_Repair-platform-_PH_Assginment-backend-server](https://github.com/limon-hasan/fullstack-final-project-Device_Repair-platform-_PH_Assginment-backend-server) |
+| **Client Repository** | [https://github.com/limon-hasan/fullstack-final-project-Device_Repair-platform-_PH_Assginment-frontend-client](https://github.com/limon-hasan/fullstack-final-project-Device_Repair-platform-_PH_Assginment-frontend-client) |
 
 ---
 
@@ -135,5 +130,41 @@ The server operates on 4 core collections alongside BetterAuth's auto-managed au
 
 ### 1. Clone the repository
 ```bash
-git clone [https://github.com/limon-hasan/fullstack-final-project-Device_Repair-platform-_PH_Assginment-backend-server.git](https://github.com/limon-hasan/fullstack-final-project-Device_Repair-platform-_PH_Assginment-backend-server.git)
+git clone https://github.com/limon-hasan/fullstack-final-project-Device_Repair-platform-_PH_Assginment-backend-server.git
 cd fullstack-final-project-Device_Repair-platform-_PH_Assginment-backend-server
+```
+
+### 2. Install dependencies
+```bash
+npm install
+```
+
+### 3. Configure Environment Variables
+Create a `.env` file in the root directory:
+
+```env
+PORT=5000
+MONGODB_URI=your_mongodb_connection_uri
+JWT_SECRET=your_jwt_secret_key
+CLIENT_URL=http://localhost:3000
+STRIPE_SECRET_KEY=sk_test_your_stripe_secret_key
+STRIPE_WEBHOOK_SECRET=whsec_your_stripe_webhook_secret
+```
+
+### 4. Run the Server
+```bash
+# Development
+npm run dev
+
+# Production
+npm start
+```
+
+### 5. Stripe Webhook Setup (Production)
+Configure a webhook destination in the **Stripe Test Dashboard** listening to `checkout.session.completed` pointing to:
+
+```text
+https://fullstack-final-project-device-repa.vercel.app/api/payments/webhook
+```
+
+Save the generated signing secret (`whsec_...`) in your deployment environment as `STRIPE_WEBHOOK_SECRET`.
