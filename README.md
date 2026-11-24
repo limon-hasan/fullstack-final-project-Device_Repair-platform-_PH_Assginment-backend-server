@@ -1,8 +1,3 @@
----
-
-## ২. Backend (Server) `README.md`
-
-```markdown
 # FixMate — Repair Service Marketplace API (Server)
 
 ![Node.js](https://img.shields.io/badge/Node.js-Runtime-339933?style=for-the-badge&logo=nodedotjs&logoColor=white)
